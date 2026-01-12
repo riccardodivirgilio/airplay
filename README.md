@@ -8,36 +8,57 @@ Download videos with yt-dlp and stream them to Apple TV.
 pip install -r requirements.txt
 ```
 
-## Usage
+## First Time Setup - Pairing with Apple TV
 
-Basic usage:
+Before you can stream videos, you need to pair with your Apple TV once. Run:
+
 ```bash
-python -m airplay "https://www.youtube.com/watch?v=VIDEO_ID"
+uv run --with pyatv atvremote wizard
 ```
 
-Specify Apple TV IP address:
+This will:
+1. Scan for Apple TV devices on your network
+2. Guide you through pairing (you'll enter a PIN shown on your TV)
+3. Save credentials to `~/.pyatv.conf`
+
+After pairing once, you can use the CLI without needing to pair again.
+
+## Usage
+
+Basic usage (auto-discovers Apple TV on network):
 ```bash
-python -m airplay "https://www.youtube.com/watch?v=VIDEO_ID" --appletv-ip 192.168.1.100
+uv run airplay/__main__.py "https://www.youtube.com/watch?v=VIDEO_ID"
+```
+
+Or if you have the script executable:
+```bash
+./airplay/__main__.py "https://www.youtube.com/watch?v=VIDEO_ID"
 ```
 
 Keep the downloaded video:
 ```bash
-python -m airplay "https://www.youtube.com/watch?v=VIDEO_ID" --keep-video
+uv run airplay/__main__.py "https://www.youtube.com/watch?v=VIDEO_ID" --keep-video
 ```
 
 Save to specific directory:
 ```bash
-python -m airplay "https://www.youtube.com/watch?v=VIDEO_ID" --output-dir ./videos
+uv run airplay/__main__.py "https://www.youtube.com/watch?v=VIDEO_ID" --output-dir ./videos
 ```
 
 ## Options
 
 - `url` - URL of the video to download and stream (required)
-- `--appletv-ip` - IP address of Apple TV (optional, will auto-discover if not provided)
 - `--keep-video` - Keep the downloaded video file after streaming
 - `--output-dir` - Directory to save the video (default: temporary directory)
 
 ## Dependencies
 
 - yt-dlp - For downloading videos
-- airplay - For streaming to Apple TV
+- pyatv - For streaming to Apple TV via AirPlay
+
+## Troubleshooting
+
+If you get authentication errors, you may need to re-pair:
+```bash
+uv run --with pyatv atvremote wizard
+```
