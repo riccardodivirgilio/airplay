@@ -3,6 +3,7 @@
 # dependencies = [
 #   "yt-dlp",
 #   "pyatv",
+#   "rangehttpserver",
 # ]
 # ///
 """
@@ -14,17 +15,18 @@ import os
 import sys
 import tempfile
 import threading
-from http.server import SimpleHTTPRequestHandler, HTTPServer
+from http.server import HTTPServer
 from pathlib import Path
 
 import pyatv
 import yt_dlp
+from RangeHTTPServer import RangeRequestHandler
 
 
 def download_video(url, output_dir):
     """Download video using yt-dlp"""
     ydl_opts = {
-        'format': 'bestvideo+bestaudio/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best',
         'outtmpl': os.path.join(output_dir, '%(title)s.%(ext)s'),
         'quiet': False,
         'extractor_args': {'youtube': {'remote_components': 'github'}},
@@ -44,13 +46,17 @@ def start_http_server(directory):
 
     # Find an available port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(('', 0))
+        s.bind(('0.0.0.0', 0))
         s.listen(1)
         port = s.getsockname()[1]
 
     os.chdir(directory)
-    handler = SimpleHTTPRequestHandler
-    httpd = HTTPServer(("", port), handler)
+
+    class LoggingRangeRequestHandler(RangeRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+    httpd = HTTPServer(("0.0.0.0", port), LoggingRangeRequestHandler)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, port
@@ -73,7 +79,6 @@ async def connect_to_appletv():
         sys.exit(1)
 
     # Scan with storage to find paired devices
-    print("Connecting to Apple TV...")
     atvs = await pyatv.scan(loop, timeout=5, storage=storage)
 
     if not atvs:
@@ -96,67 +101,81 @@ async def connect_to_appletv():
         sys.exit(1)
 
     # Connect to the selected device
+    print(f"Connecting to {selected_atv.name}...")
     atv = await pyatv.connect(selected_atv, loop, storage=storage)
     return atv
 
 
-async def play_video(atv, video_path):
+async def play_video(atv, video_path, test_server=False):
     """Play video on Apple TV"""
     # Start HTTP server to serve the video file
     video_dir = os.path.dirname(video_path)
     video_filename = os.path.basename(video_path)
     httpd, port = start_http_server(video_dir)
 
-    # Get local IP address
+    # Get local IP on same network as Apple TV
     import socket
+    conf = atv._config
+    atv_ip = str(conf.address)
+
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    s.connect(("8.8.8.8", 80))
+    s.connect((atv_ip, 80))
     local_ip = s.getsockname()[0]
     s.close()
 
-    video_url = f"http://{local_ip}:{port}/{video_filename}"
-    print(f"Streaming video: {video_url}")
+    from urllib.parse import quote
+    video_url = f"http://{local_ip}:{port}/{quote(video_filename)}"
+    print(f"Streaming {video_filename} to {atv._config.name} at {video_url}")
+
+    # Test server if requested
+    if test_server:
+        import aiohttp
+        print("Testing HTTP server accessibility...")
+        async with aiohttp.ClientSession() as session:
+            async with session.head(video_url) as resp:
+                print(f"  HEAD request: status={resp.status}")
+                print(f"  Content-Type: {resp.headers.get('Content-Type')}")
+                print(f"  Content-Length: {resp.headers.get('Content-Length')}")
+                if resp.status != 200:
+                    print(f"ERROR: Server returned status {resp.status}")
+                    httpd.shutdown()
+                    atv.close()
+                    raise Exception(f"HTTP server test failed with status {resp.status}")
 
     # Start playback
-    try:
-        await atv.stream.play_url(video_url)
-        print("Video playback completed!")
-    except Exception as e:
-        # Ignore errors during playback monitoring - video is likely already playing
-        if "HTTP" in str(e) or "500" in str(e):
-            print("Video sent to Apple TV!")
-            print("(Playback monitoring failed but video should be playing)")
-        else:
-            raise
+    await atv.stream.play_url(video_url)
+    print("Playback completed!")
 
     httpd.shutdown()
     atv.close()
 
 
-async def main_async(url, output_dir, keep_video):
+async def main_async(url_or_path, output_dir, keep_video, test_server):
     """Async main function"""
-    use_temp = output_dir is None
-    if output_dir is None:
-        output_dir = tempfile.mkdtemp()
-
     # Connect to Apple TV using saved config
     atv = await connect_to_appletv()
 
-    # Download the video after we know Apple TV is available
-    video_path = download_video(url, output_dir)
+    # Determine if we need to download or use existing file
+    if url_or_path.startswith('http://') or url_or_path.startswith('https://'):
+        # Download from URL
+        use_temp = output_dir is None
+        if output_dir is None:
+            output_dir = tempfile.mkdtemp()
+        else:
+            os.makedirs(output_dir, exist_ok=True)
+
+        video_path = download_video(url_or_path, output_dir)
+    else:
+        # Use local file
+        video_path = url_or_path
+        use_temp = False
+        if not os.path.exists(video_path):
+            print(f"Error: File not found: {video_path}")
+            sys.exit(1)
+        print(f"Using local file: {video_path}")
 
     # Play video
-    try:
-        await play_video(atv, video_path)
-    except Exception as e:
-        if "not authenticated" in str(e) or "AuthenticationError" in str(type(e).__name__):
-            print("\nAuthentication Error: You need to pair with your Apple TV first.")
-            print("Run this command to pair:")
-            print("  uv run --with pyatv atvremote wizard")
-            print("\nOr manually pair with:")
-            print("  uv run --with pyatv atvremote --id <device_id> --protocol airplay pair")
-            sys.exit(1)
-        raise
+    await play_video(atv, video_path, test_server)
 
     # Clean up if using temp directory and not keeping video
     if use_temp and not keep_video:
@@ -170,8 +189,8 @@ def main():
         description='Download videos with yt-dlp and stream to Apple TV'
     )
     parser.add_argument(
-        'url',
-        help='URL of the video to download and stream'
+        'url_or_path',
+        help='URL to download or path to local video file'
     )
     parser.add_argument(
         '--keep-video',
@@ -183,14 +202,15 @@ def main():
         help='Directory to save the video (default: temporary directory)',
         default=None
     )
+    parser.add_argument(
+        '--test-server',
+        action='store_true',
+        help='Test HTTP server accessibility before streaming'
+    )
 
     args = parser.parse_args()
 
-    # Set up output directory
-    if args.output_dir:
-        os.makedirs(args.output_dir, exist_ok=True)
-
-    asyncio.run(main_async(args.url, args.output_dir, args.keep_video))
+    asyncio.run(main_async(args.url_or_path, args.output_dir, args.keep_video, args.test_server))
 
 
 if __name__ == '__main__':
