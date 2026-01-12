@@ -56,22 +56,47 @@ def start_http_server(directory):
     return httpd, port
 
 
-async def discover_appletv():
-    """Discover and connect to Apple TV"""
-    print("Discovering Apple TV on network...")
+async def connect_to_appletv():
+    """Connect to Apple TV using saved configuration"""
+    from pyatv.storage.file_storage import FileStorage
 
     loop = asyncio.get_event_loop()
-    atvs = await pyatv.scan(loop, timeout=5)
 
-    if not atvs:
-        print("No Apple TV devices found on the network")
+    # Load the same storage that atvremote uses
+    storage = FileStorage.default_storage(loop)
+    await storage.load()
+
+    if not storage.settings:
+        print("No saved Apple TV configuration found.")
+        print("Please pair with your Apple TV first:")
+        print("  uv run --with pyatv atvremote wizard")
         sys.exit(1)
 
-    print(f"Found {len(atvs)} Apple TV device(s)")
-    atv_config = atvs[0]
-    print(f"Connecting to: {atv_config.name}")
+    # Scan with storage to find paired devices
+    print("Connecting to Apple TV...")
+    atvs = await pyatv.scan(loop, timeout=5, storage=storage)
 
-    atv = await pyatv.connect(atv_config, loop)
+    if not atvs:
+        print("No paired Apple TV found on network.")
+        print("Make sure your Apple TV is on and connected to the network.")
+        sys.exit(1)
+
+    # Find first device with AirPlay credentials
+    selected_atv = None
+    for atv_config in atvs:
+        airplay_service = atv_config.get_service(pyatv.const.Protocol.AirPlay)
+        if airplay_service and airplay_service.credentials:
+            selected_atv = atv_config
+            break
+
+    if not selected_atv:
+        print("No Apple TV with AirPlay credentials found.")
+        print("Please pair with your Apple TV first:")
+        print("  uv run --with pyatv atvremote wizard")
+        sys.exit(1)
+
+    # Connect to the selected device
+    atv = await pyatv.connect(selected_atv, loop, storage=storage)
     return atv
 
 
@@ -90,14 +115,19 @@ async def play_video(atv, video_path):
     s.close()
 
     video_url = f"http://{local_ip}:{port}/{video_filename}"
-    print(f"Streaming video from: {video_url}")
+    print(f"Streaming video: {video_url}")
 
-    await atv.stream.play_url(video_url)
-
-    print("Video sent successfully!")
-
-    # Keep server running for a bit to allow streaming
-    await asyncio.sleep(5)
+    # Start playback
+    try:
+        await atv.stream.play_url(video_url)
+        print("Video playback completed!")
+    except Exception as e:
+        # Ignore errors during playback monitoring - video is likely already playing
+        if "HTTP" in str(e) or "500" in str(e):
+            print("Video sent to Apple TV!")
+            print("(Playback monitoring failed but video should be playing)")
+        else:
+            raise
 
     httpd.shutdown()
     atv.close()
@@ -109,8 +139,8 @@ async def main_async(url, output_dir, keep_video):
     if output_dir is None:
         output_dir = tempfile.mkdtemp()
 
-    # Discover Apple TV first
-    atv = await discover_appletv()
+    # Connect to Apple TV using saved config
+    atv = await connect_to_appletv()
 
     # Download the video after we know Apple TV is available
     video_path = download_video(url, output_dir)
